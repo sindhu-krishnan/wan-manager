@@ -35,6 +35,7 @@
 #include "wanmgr_dhcpv4_apis.h"
 #include "wanmgr_dhcpv6_apis.h"
 #include "secure_wrapper.h"
+#include "wanmgr_telemetry.h"
 #ifdef ENABLE_FEATURE_TELEMETRY2_0
 #include <telemetry_busmessage_sender.h>
 #endif
@@ -48,6 +49,7 @@
 #define IPOE_HEALTH_CHECK_V4_STATUS "ipoe_health_check_ipv4_status"
 #define IPOE_HEALTH_CHECK_V6_STATUS "ipoe_health_check_ipv6_status"
 #define IPOE_STATUS_FAILED "failed"
+#define IPOE_STATUS_IDLE "idle"
 #endif
 
 #define POSTD_START_FILE "/tmp/.postd_started"
@@ -82,8 +84,6 @@ static eWanState_t wan_state_mapt_active(WanMgr_IfaceSM_Controller_t* pWanIfaceC
 static eWanState_t wan_state_refreshing_wan(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 static eWanState_t wan_state_deconfiguring_wan(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 static eWanState_t wan_state_exit(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
-static eWanState_t wan_state_phy_down(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
-static eWanState_t wan_state_phy_configuring(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 
 /*WAN Manager Transitions*/
 static eWanState_t wan_transition_start(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
@@ -99,7 +99,6 @@ static eWanState_t wan_transition_ipv6_down(WanMgr_IfaceSM_Controller_t* pWanIfa
 static eWanState_t wan_transition_dual_stack_down(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 static eWanState_t wan_transition_standby(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 static eWanState_t wan_transition_standby_deconfig_ips(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
-static eWanState_t wan_transition_vlan_configure(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 
 #if defined(FEATURE_MAPT) || defined(FEATURE_SUPPORT_MAPT_NAT46)
 static eWanState_t wan_transition_mapt_feature_refresh(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
@@ -107,9 +106,6 @@ static eWanState_t wan_transition_mapt_up(WanMgr_IfaceSM_Controller_t* pWanIface
 static eWanState_t wan_transition_mapt_down(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 extern int mapt_feature_enable_changed;
 #endif //FEATURE_MAPT
-static eWanState_t wan_transition_configuring_interface(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
-static eWanState_t wan_transition_phy_deconfiguring(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
-static eWanState_t wan_transition_wan_deconfigured(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 static eWanState_t wan_transition_exit(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
 
 static ANSC_STATUS WanMgr_StartConnectivityCheck(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl);
@@ -445,7 +441,7 @@ static void WanMgr_MonitorDhcpApps (WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
         // let the caller state handle RefreshDHCP=TRUE scenario
         CcspTraceError(("%s %d: IP Mode change detected, handle RefreshDHCP & later monitor DHCP apps\n", __FUNCTION__, __LINE__));
         //reset flag here, if the IP mode and source changes are addressed.
-        if((((p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP && p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_SLAAC) || p_VirtIf->IP.Mode == DML_WAN_IP_MODE_NO_IP) && p_VirtIf->IP.Dhcp4cStatus != DHCPC_STARTED && p_VirtIf->IP.Dhcp6cStatus != DHCPC_STARTED)|| //TODO : check why only IP.IPv6Source checked?
+        if(((p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.Mode == DML_WAN_IP_MODE_NO_IP) && p_VirtIf->IP.Dhcp4cStatus != DHCPC_STARTED && p_VirtIf->IP.Dhcp6cStatus != DHCPC_STARTED)|| //TODO : check why only IP.IPv6Source checked?
             (p_VirtIf->IP.Mode == DML_WAN_IP_MODE_IPV6_ONLY && p_VirtIf->IP.Dhcp4cStatus != DHCPC_STARTED && p_VirtIf->IP.Dhcp6cStatus == DHCPC_STARTED) || //IPv6 only mode, reset if DHCPv4 not running and v6 running
             (p_VirtIf->IP.Mode == DML_WAN_IP_MODE_IPV4_ONLY && p_VirtIf->IP.Dhcp4cStatus == DHCPC_STARTED&& p_VirtIf->IP.Dhcp6cStatus != DHCPC_STARTED) || //IPv4 only mode, reset if DHCPv4 running and v6 not running
             (p_VirtIf->IP.Mode == DML_WAN_IP_MODE_DUAL_STACK && p_VirtIf->IP.Dhcp4cStatus == DHCPC_STARTED && p_VirtIf->IP.Dhcp6cStatus == DHCPC_STARTED))  //Dual stack mode, reset if DHCPv4 running and v6 running
@@ -475,7 +471,7 @@ static void WanMgr_MonitorDhcpApps (WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
 
     //Check if IPv6 dhcp client is still running - handling runtime crash of dhcp client
     if ((p_VirtIf->IP.Mode == DML_WAN_IP_MODE_IPV6_ONLY || p_VirtIf->IP.Mode == DML_WAN_IP_MODE_DUAL_STACK) &&  // IP.Mode supports V6
-        ( ( p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP ) || ( p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_SLAAC ) ) &&                                                    // uses DHCP client
+        p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP &&                                                    // uses DHCP client
         (p_VirtIf->IP.Dhcp6cPid == -1 ||                                                                           // DHCP cleint failed to start
         (p_VirtIf->IP.Dhcp6cPid > 0 &&                                                                          // dhcp started by ISM
         WanMgr_IsPIDRunning(p_VirtIf->IP.Dhcp6cPid) != TRUE)))                                                   // but DHCP client not running
@@ -489,7 +485,7 @@ static void WanMgr_MonitorDhcpApps (WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
             Force_IPv6_toggle(p_VirtIf->Name); 
         }
         WanManager_StartDhcpv6Client(p_VirtIf, pInterface->IfaceType);
-        CcspTraceInfo(("%s %d - SELFHEAL - Started dhcp6c on interface %s, dhcpv6_pid %d \n", __FUNCTION__, __LINE__, p_VirtIf->Name, p_VirtIf->IP.Dhcp6cPid));
+        CcspTraceInfo(("%s %d - SELFHEAL - Started dhcp6c on interface %s, dhcpv6_pid %d \n", __FUNCTION__, __LINE__, p_VirtIf->Name));
 #ifdef ENABLE_FEATURE_TELEMETRY2_0
         t2_event_d("SYS_ERROR_DHCPV6Client_notrunning", 1);
 #endif
@@ -666,11 +662,13 @@ void WanManager_UpdateInterfaceStatus(DML_VIRTUAL_IFACE* pVirtIf, wanmgr_iface_s
                 sysevent_set(sysevent_fd, sysevent_token, SYSEVENT_IPV4_TIME_ZONE, pVirtIf->IP.Ipv4Data.timeZone, 0);
             }
 #endif
+            WanMgr_ProcessTelemetryMarker(pVirtIf,WAN_INFO_IPv4_UP);	    
             pVirtIf->IP.Ipv4Status = WAN_IFACE_IPV4_STATE_UP;
             break;
         }
         case WANMGR_IFACE_CONNECTION_DOWN:
         {
+            WanMgr_ProcessTelemetryMarker(pVirtIf,WAN_ERROR_IPv4_DOWN);		
             pVirtIf->IP.Ipv4Status = WAN_IFACE_IPV4_STATE_DOWN;
             pVirtIf->IP.Ipv4Changed = FALSE;
             pVirtIf->IP.Ipv4Renewed = FALSE;
@@ -679,11 +677,14 @@ void WanManager_UpdateInterfaceStatus(DML_VIRTUAL_IFACE* pVirtIf, wanmgr_iface_s
         }
         case WANMGR_IFACE_CONNECTION_IPV6_UP:
         {
+            WanMgr_ProcessTelemetryMarker(pVirtIf,WAN_INFO_IPv6_UP);		
             pVirtIf->IP.Ipv6Status = WAN_IFACE_IPV6_STATE_UP;
             break;
         }
         case WANMGR_IFACE_CONNECTION_IPV6_DOWN:
         {
+            WanMgr_ProcessTelemetryMarker(pVirtIf,WAN_ERROR_IPv6_DOWN);
+            WanMgr_ProcessTelemetryMarker(pVirtIf,WAN_ERROR_MAPT_STATUS_DOWN);		
             pVirtIf->IP.Ipv6Status = WAN_IFACE_IPV6_STATE_DOWN;
             pVirtIf->IP.Ipv6Changed = FALSE;
             pVirtIf->IP.Ipv6Renewed = FALSE;
@@ -700,6 +701,7 @@ void WanManager_UpdateInterfaceStatus(DML_VIRTUAL_IFACE* pVirtIf, wanmgr_iface_s
 #if defined(FEATURE_MAPT) || defined(FEATURE_SUPPORT_MAPT_NAT46)
         case WANMGR_IFACE_MAPT_START:
         {
+            WanMgr_ProcessTelemetryMarker(pVirtIf,WAN_INFO_MAPT_STATUS_UP);		
             pVirtIf->MAP.MaptStatus = WAN_IFACE_MAPT_STATE_UP;
             CcspTraceInfo(("mapt: %s \n",
                    ((iface_status == WANMGR_IFACE_MAPT_START) ? "UP" : (iface_status == WANMGR_IFACE_MAPT_STOP) ? "DOWN" : "N/A")));
@@ -708,6 +710,7 @@ void WanManager_UpdateInterfaceStatus(DML_VIRTUAL_IFACE* pVirtIf, wanmgr_iface_s
         }
         case WANMGR_IFACE_MAPT_STOP:
         {
+            WanMgr_ProcessTelemetryMarker(pVirtIf,WAN_ERROR_MAPT_STATUS_DOWN);		
             pVirtIf->MAP.MaptStatus = WAN_IFACE_MAPT_STATE_DOWN;     // reset MAPT flag
             pVirtIf->MAP.MaptChanged = FALSE;                        // reset MAPT flag
             CcspTraceInfo(("mapt: %s \n",
@@ -1251,7 +1254,7 @@ static int wan_setUpIPv4(WanMgr_IfaceSM_Controller_t * pWanIfaceCtrl)
         sysevent_set(sysevent_fd, sysevent_token, SYSEVENT_WAN_STATUS, WAN_STATUS_STARTED, 0);
         CcspTraceInfo(("%s %d - wan-status event set to started \n", __FUNCTION__, __LINE__));
 
-        if(p_VirtIf->IP.Ipv4Data.ifname[0] != '\0' && pInterface->IfaceType != REMOTE_IFACE && (WAN_IFACE_CONN_TYPE_COLD_STANDBY != pInterface->IfaceConnectionType))
+        if(p_VirtIf->IP.Ipv4Data.ifname[0] != '\0' && pInterface->IfaceType != REMOTE_IFACE)
         {
             syscfg_set_commit(NULL, SYSCFG_WAN_INTERFACE_NAME, p_VirtIf->IP.Ipv4Data.ifname);
         }
@@ -1429,7 +1432,7 @@ static int wan_setUpIPv6(WanMgr_IfaceSM_Controller_t * pWanIfaceCtrl)
 
         /* Set the current WAN Interface name */
         sysevent_set(sysevent_fd, sysevent_token, SYSEVENT_CURRENT_WAN_IFNAME, p_VirtIf->IP.Ipv6Data.ifname, 0);
-        if(p_VirtIf->IP.Ipv6Data.ifname[0] != '\0' && pInterface->IfaceType != REMOTE_IFACE && (WAN_IFACE_CONN_TYPE_COLD_STANDBY != pInterface->IfaceConnectionType) )
+        if(p_VirtIf->IP.Ipv6Data.ifname[0] != '\0' && pInterface->IfaceType != REMOTE_IFACE)
         {
             syscfg_set_commit(NULL, SYSCFG_WAN_INTERFACE_NAME, p_VirtIf->IP.Ipv6Data.ifname);
         }
@@ -1513,22 +1516,6 @@ static int wan_tearDownIPv6(WanMgr_IfaceSM_Controller_t * pWanIfaceCtrl)
     if ( WanManager_Ipv6PrefixUtil(p_VirtIf->Name, DEL_ADDR,0,0) < 0)
     {
         AnscTraceError(("%s %d -  Failed to remove inactive address \n", __FUNCTION__,__LINE__));
-    }
-
-    //Remove the default route and IPv6 address explitcly when SLAAC mode since no prefix
-    if ( DML_WAN_IP_SOURCE_SLAAC == p_VirtIf->IP.IPv6Source )
-    {
-        char acCmdLine[BUFLEN_128] = {0};
-        CcspTraceInfo(("%s %d -  Deleting IPv6 default route for '%s' interface\n", __FUNCTION__, __LINE__, p_VirtIf->Name));
-        snprintf(acCmdLine, sizeof(acCmdLine), "ip -6 route del default dev %s", p_VirtIf->Name);
-        if (WanManager_DoSystemActionWithStatus("ip -6 route delete default", acCmdLine) != 0)
-            CcspTraceError(("%s-%d Failed to run cmd: %s", __FUNCTION__, __LINE__, acCmdLine));
-
-        CcspTraceInfo(("%s %d -  Deleting IPv6 global address route for '%s' interface\n", __FUNCTION__, __LINE__, p_VirtIf->Name));
-        memset(acCmdLine, 0, sizeof(acCmdLine));
-        snprintf(acCmdLine, sizeof(acCmdLine), "ip -6 addr flush scope global dev %s", p_VirtIf->Name);
-        if (WanManager_DoSystemActionWithStatus("ip -6 addr flush scope global dev", acCmdLine) != 0)
-            CcspTraceError(("%s-%d Failed to run cmd: %s", __FUNCTION__, __LINE__, acCmdLine));
     }
 
     // Reset sysvevents.
@@ -1756,6 +1743,7 @@ static ANSC_STATUS WanMgr_SendMsgTo_ConnectivityCheck(WanMgr_IfaceSM_Controller_
             {
                 if(p_VirtIf->IP.Ipv4Renewed == TRUE && (strcmp(IHC_status, IPOE_STATUS_FAILED) == 0))
                 {
+                    WanMgr_ProcessTelemetryMarker(p_VirtIf,WAN_WARN_CONNECTIVITY_CHECK_STATUS_FAILED_IPV4);			
                     //Restarting firewall to add IPOE_HEALTH_CHECK firewall rules.
                     sysevent_set(sysevent_fd, sysevent_token, SYSEVENT_FIREWALL_RESTART, NULL, 0);
                 }
@@ -1778,6 +1766,7 @@ static ANSC_STATUS WanMgr_SendMsgTo_ConnectivityCheck(WanMgr_IfaceSM_Controller_
             {
                 if(p_VirtIf->IP.Ipv6Renewed == TRUE && (strcmp(IHC_status, IPOE_STATUS_FAILED) == 0))
                 {
+                    WanMgr_ProcessTelemetryMarker(p_VirtIf,WAN_WARN_CONNECTIVITY_CHECK_STATUS_FAILED_IPV6);			
                     //Restarting firewall to add IPOE_HEALTH_CHECK firewall rules.
                     sysevent_set(sysevent_fd, sysevent_token, SYSEVENT_FIREWALL_RESTART, NULL, 0);
                 }
@@ -1876,34 +1865,6 @@ static eWanState_t wan_transition_start(WanMgr_IfaceSM_Controller_t* pWanIfaceCt
         CcspTraceInfo(("%s %d - Already WAN interface %s created\n", __FUNCTION__, __LINE__, p_VirtIf->Name));
     }
 
-    /*Should Update available status */
-    Update_Interface_Status();
-
-    CcspTraceInfo(("%s %d - Interface '%s' - TRANSITION START\n", __FUNCTION__, __LINE__, pInterface->Name));
-
-    p_VirtIf->Interface_SM_Running = TRUE;
-
-    WanManager_GetDateAndUptime( buffer, &uptime );
-    LOG_CONSOLE("%s [tid=%ld] Wan_init_start:%d\n", buffer, syscall(SYS_gettid), uptime);
-
-    WanMgr_GetSelectedIPMode(p_VirtIf); //Get SelectedIPMode
-
-    WanManager_PrintBootEvents (WAN_INIT_START);
-
-    return WAN_STATE_PHY_CONFIGURING;
-}
-
-static eWanState_t wan_transition_vlan_configure(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
-{
-    CcspTraceInfo(("%s %d \n", __FUNCTION__, __LINE__));
-    if((pWanIfaceCtrl == NULL) || (pWanIfaceCtrl->pIfaceData == NULL))
-    {
-        return ANSC_STATUS_FAILURE;
-    }
-
-    DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
-    DML_VIRTUAL_IFACE* p_VirtIf = WanMgr_getVirtualIfaceById(pInterface->VirtIfList, pWanIfaceCtrl->VirIfIdx);
-
     /*TODO: VLAN should not be set for Remote Interface, for More info, refer RDKB-42676*/
     if(  p_VirtIf->VLAN.Enable == TRUE && p_VirtIf->VLAN.Status == WAN_IFACE_LINKSTATUS_DOWN && pInterface->IfaceType != REMOTE_IFACE)
     {
@@ -1918,7 +1879,19 @@ static eWanState_t wan_transition_vlan_configure(WanMgr_IfaceSM_Controller_t* pW
         WanMgr_RdkBus_ConfigureVlan(p_VirtIf, TRUE);
     }
 
-    CcspTraceInfo(("%s %d - Interface '%s' - TRANSITION VLAN CONFIGURE\n", __FUNCTION__, __LINE__, pInterface->Name));
+    /*Should Update available status */
+    Update_Interface_Status();
+
+    CcspTraceInfo(("%s %d - Interface '%s' - TRANSITION START\n", __FUNCTION__, __LINE__, pInterface->Name));
+
+    p_VirtIf->Interface_SM_Running = TRUE;
+
+    WanManager_GetDateAndUptime( buffer, &uptime );
+    LOG_CONSOLE("%s [tid=%ld] Wan_init_start:%d\n", buffer, syscall(SYS_gettid), uptime);
+
+    WanMgr_GetSelectedIPMode(p_VirtIf); //Get SelectedIPMode
+
+    WanManager_PrintBootEvents (WAN_INIT_START);
 
     return WAN_STATE_VLAN_CONFIGURING;
 }
@@ -2006,8 +1979,9 @@ static eWanState_t wan_transition_physical_interface_down(WanMgr_IfaceSM_Control
         if (pInterface->IfaceType != REMOTE_IFACE) //TODO NEW_DESIGN rework for remote interface
         {
             WanMgr_RdkBus_ConfigureVlan(p_VirtIf, FALSE);        
+            WanMgr_ProcessTelemetryMarker(p_VirtIf,WAN_ERROR_VLAN_DOWN);	    
             /* VLAN link is not created yet if LinkStatus is CONFIGURING. Change it to down. */
-            if( p_VirtIf->VLAN.Status == WAN_IFACE_LINKSTATUS_CONFIGURING )
+            if( p_VirtIf->VLAN.Status == WAN_IFACE_LINKSTATUS_CONFIGURING || p_VirtIf->VLAN.Status == WAN_IFACE_LINKSTATUS_UP )
             {
                 CcspTraceInfo(("%s %d: LinkStatus is still CONFIGURING. Set to down\n", __FUNCTION__, __LINE__));
                 p_VirtIf->VLAN.Status = WAN_IFACE_LINKSTATUS_DOWN;
@@ -2066,7 +2040,7 @@ static eWanState_t wan_transition_wan_validated(WanMgr_IfaceSM_Controller_t* pWa
     DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
     DML_VIRTUAL_IFACE* p_VirtIf = WanMgr_getVirtualIfaceById(pInterface->VirtIfList, pWanIfaceCtrl->VirIfIdx);
 
-    if((p_VirtIf->IP.IPv4Source == DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_SLAAC ) && (p_VirtIf->IP.SelectedModeTimerStatus != EXPIRED) )
+    if((p_VirtIf->IP.IPv4Source == DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP) && (p_VirtIf->IP.SelectedModeTimerStatus != EXPIRED) )
     {
         /* Clear DHCP data */
         WanManager_ClearDHCPData(p_VirtIf);
@@ -2097,7 +2071,7 @@ static eWanState_t wan_transition_wan_validated(WanMgr_IfaceSM_Controller_t* pWa
             WanManager_StartDhcpv4Client(p_VirtIf,pInterface->Name, pInterface->IfaceType);
         }
 
-        if(((p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP) || (p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_SLAAC) ) && (p_VirtIf->IP.Dhcp6cStatus != DHCPC_STARTED) &&
+        if(p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP && (p_VirtIf->IP.Dhcp6cStatus != DHCPC_STARTED) &&
             (p_VirtIf->IP.Mode == DML_WAN_IP_MODE_DUAL_STACK || p_VirtIf->IP.Mode == DML_WAN_IP_MODE_IPV6_ONLY))
         {
             /* Start all interface with accept ra disbaled */
@@ -2592,7 +2566,7 @@ static eWanState_t wan_transition_ipv6_down(WanMgr_IfaceSM_Controller_t* pWanIfa
         pInterface->BaseInterfaceStatus !=  WAN_IFACE_PHY_STATUS_UP ||
         (p_VirtIf->VLAN.Enable == TRUE && p_VirtIf->VLAN.Status ==  WAN_IFACE_LINKSTATUS_DOWN) ||
         (p_VirtIf->PPP.Enable == TRUE && p_VirtIf->PPP.LinkStatus != WAN_IFACE_PPP_LINK_STATUS_UP) ||
-        (p_VirtIf->IP.RefreshDHCP == TRUE && ((p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP && p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_SLAAC) ||
+        (p_VirtIf->IP.RefreshDHCP == TRUE && (p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP ||
         (p_VirtIf->IP.Mode != DML_WAN_IP_MODE_IPV6_ONLY && p_VirtIf->IP.Mode != DML_WAN_IP_MODE_DUAL_STACK))))
     {
         CcspTraceInfo(("%s %d: Stopping DHCP v6\n", __FUNCTION__, __LINE__));
@@ -2626,9 +2600,6 @@ static eWanState_t wan_transition_ipv6_down(WanMgr_IfaceSM_Controller_t* pWanIfa
     WanMgr_Rbus_EventPublishHandler(param_name, "", RBUS_STRING);
     WanManager_UpdateInterfaceStatus (p_VirtIf, WANMGR_IFACE_CONNECTION_IPV6_DOWN);
 
-    //Disable accept_ra
-    WanMgr_Configure_accept_ra(p_VirtIf, FALSE);
-
     if(p_VirtIf->Status == WAN_IFACE_STATUS_UP)
     {
         if (wan_tearDownIPv6(pWanIfaceCtrl) != RETURN_OK)
@@ -2648,6 +2619,8 @@ static eWanState_t wan_transition_ipv6_down(WanMgr_IfaceSM_Controller_t* pWanIfa
 
     Update_Interface_Status();
     sysevent_get(sysevent_fd, sysevent_token, SYSEVENT_IPV4_CONNECTION_STATE, buf, sizeof(buf));
+    //Disable accept_ra
+    WanMgr_Configure_accept_ra(p_VirtIf, FALSE);
 
     if(p_VirtIf->IP.Ipv4Status == WAN_IFACE_IPV4_STATE_UP && !strcmp(buf, WAN_STATUS_UP))
     {
@@ -2721,7 +2694,7 @@ static eWanState_t wan_transition_mapt_feature_refresh(WanMgr_IfaceSM_Controller
         WanManager_ConfigurePPPSession(p_VirtIf, TRUE);
     }
 
-    if ((p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_SLAAC ) &&
+    if (p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP &&
        (p_VirtIf->IP.Mode == DML_WAN_IP_MODE_DUAL_STACK || p_VirtIf->IP.Mode == DML_WAN_IP_MODE_IPV6_ONLY))
     {
         // MAPT config changed, if we got a v6 lease at this stage, send a v6 RELEASE
@@ -2775,6 +2748,7 @@ static eWanState_t wan_transition_mapt_up(WanMgr_IfaceSM_Controller_t* pWanIface
     if (ret != RETURN_OK)
     {
         CcspTraceError(("%s %d - Failed to configure MAP-T \n", __FUNCTION__, __LINE__));
+        WanMgr_ProcessTelemetryMarker(WanMgr_getVirtualIfaceById( pInterface->VirtIfList,0),WAN_ERROR_MAPT_STATUS_FAILED);	
     }
 
     if (p_VirtIf->IP.Dhcp4cStatus == DHCPC_STARTED)
@@ -2891,70 +2865,6 @@ static eWanState_t wan_transition_mapt_down(WanMgr_IfaceSM_Controller_t* pWanIfa
 }
 #endif //FEATURE_MAPT
 
-static eWanState_t wan_transition_configuring_interface(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
-{
-    CcspTraceInfo(("%s %d \n", __FUNCTION__, __LINE__));
-
-    if((pWanIfaceCtrl == NULL) || (pWanIfaceCtrl->pIfaceData == NULL))
-    {
-        return ANSC_STATUS_FAILURE;
-    }
-
-    DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
-
-    // Check the interface type is cold standby then needs to be activate/decativate at runtime
-    if( WAN_IFACE_CONN_TYPE_COLD_STANDBY == pInterface->IfaceConnectionType )
-    {
-        // Configure Interface
-        if ( ANSC_STATUS_FAILURE == WanManager_RdkBus_EnableInterface(pInterface, TRUE) )
-        {
-            CcspTraceInfo(("%s %d - Interface '%s' - TRANSITION PHY CONFIGURING\n", __FUNCTION__, __LINE__, pInterface->Name));
-            return WAN_STATE_PHY_CONFIGURING;
-        }
-    }
-
-    CcspTraceInfo(("%s %d - Interface '%s' - TRANSITION STATE PHY DOWN\n", __FUNCTION__, __LINE__, pInterface->Name));
-    return WAN_STATE_PHY_DOWN;
-}
-
-static eWanState_t wan_transition_phy_deconfiguring(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
-{
-    CcspTraceInfo(("%s %d \n", __FUNCTION__, __LINE__));
-
-    if((pWanIfaceCtrl == NULL) || (pWanIfaceCtrl->pIfaceData == NULL))
-    {
-        return ANSC_STATUS_FAILURE;
-    }
-
-    DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
-
-    // Check the interface type is cold standby then needs to be activate/decativate at runtime
-    if( WAN_IFACE_CONN_TYPE_COLD_STANDBY == pInterface->IfaceConnectionType )
-    {
-       // Configure Interface
-       WanManager_RdkBus_EnableInterface(pInterface, FALSE);
-       pInterface->BaseInterfaceStatus = WAN_IFACE_PHY_STATUS_DOWN;
-    }
-
-    CcspTraceInfo(("%s %d - Interface '%s' - TRANSITION STATE PHY CONFIGURING\n", __FUNCTION__, __LINE__, pInterface->Name));
-    return WAN_STATE_PHY_CONFIGURING;
-}
-
-static eWanState_t wan_transition_wan_deconfigured(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
-{
-    CcspTraceInfo(("%s %d \n", __FUNCTION__, __LINE__));
-
-    if((pWanIfaceCtrl == NULL) || (pWanIfaceCtrl->pIfaceData == NULL))
-    {
-        return ANSC_STATUS_FAILURE;
-    }
-
-    DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
-
-    CcspTraceInfo(("%s %d - Interface '%s' - TRANSITION STATE PHY DOWN\n", __FUNCTION__, __LINE__, pInterface->Name));
-    return WAN_STATE_PHY_DOWN;
-}
-
 static eWanState_t wan_transition_exit(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
 {
     CcspTraceInfo(("%s %d \n", __FUNCTION__, __LINE__));
@@ -2978,6 +2888,7 @@ static eWanState_t wan_transition_exit(WanMgr_IfaceSM_Controller_t* pWanIfaceCtr
     Update_Interface_Status();
     CcspTraceInfo(("%s %d - Interface '%s' - EXITING STATE MACHINE\n", __FUNCTION__, __LINE__, pInterface->Name));
 
+    WanMgr_ProcessTelemetryMarker(p_VirtIf,WAN_ERROR_WAN_DOWN);
     p_VirtIf->Interface_SM_Running = FALSE;
     
     return WAN_STATE_EXIT;
@@ -2994,6 +2905,7 @@ static eWanState_t wan_transition_standby(WanMgr_IfaceSM_Controller_t* pWanIface
     DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
     DML_VIRTUAL_IFACE* p_VirtIf = WanMgr_getVirtualIfaceById(pInterface->VirtIfList, pWanIfaceCtrl->VirIfIdx);
 
+    WanMgr_ProcessTelemetryMarker(p_VirtIf, WAN_INFO_WAN_STANDBY);
     p_VirtIf->Status = WAN_IFACE_STATUS_STANDBY;
 
     if (pWanIfaceCtrl->interfaceIdx != -1)
@@ -3052,8 +2964,6 @@ static eWanState_t wan_transition_standby_deconfig_ips(WanMgr_IfaceSM_Controller
         }
     }
 
-    WanMgr_Configure_accept_ra(p_VirtIf, FALSE);
-
     if (p_VirtIf->IP.Ipv6Status == WAN_IFACE_IPV6_STATE_UP)
     {
         CcspTraceInfo(("%s %d - Deconfiguring Ipv6 for %s \n", __FUNCTION__, __LINE__, p_VirtIf->Name));
@@ -3063,6 +2973,10 @@ static eWanState_t wan_transition_standby_deconfig_ips(WanMgr_IfaceSM_Controller
         }
         p_VirtIf->IP.Ipv6Changed = TRUE; //We have deconfigured Ipv6 from the device. set this flag to configure again when moves back to active.
     }
+
+    WanMgr_Configure_accept_ra(p_VirtIf, FALSE);
+
+    WanMgr_ProcessTelemetryMarker(p_VirtIf, WAN_INFO_WAN_STANDBY);
 
     p_VirtIf->Status = WAN_IFACE_STATUS_STANDBY;
     if (pWanIfaceCtrl->interfaceIdx != -1)
@@ -3078,61 +2992,6 @@ static eWanState_t wan_transition_standby_deconfig_ips(WanMgr_IfaceSM_Controller
 /*********************************************************************************/
 /**************************** STATES *********************************************/
 /*********************************************************************************/
-static eWanState_t wan_state_phy_configuring(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
-{
-    if((pWanIfaceCtrl == NULL) || (pWanIfaceCtrl->pIfaceData == NULL))
-    {
-        return ANSC_STATUS_FAILURE;
-    }
-
-    DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
-    DML_VIRTUAL_IFACE* p_VirtIf = WanMgr_getVirtualIfaceById(pInterface->VirtIfList, pWanIfaceCtrl->VirIfIdx);
-
-    if (pWanIfaceCtrl->WanEnable == FALSE ||
-            pInterface->Selection.Enable == FALSE ||
-            p_VirtIf->Enable == FALSE ||
-            pInterface->Selection.Status == WAN_IFACE_NOT_SELECTED)
-    {
-        return wan_transition_exit(pWanIfaceCtrl);
-    }
-    
-
-    //TBC: Workaround, Wait in current state if the component not ready
-    if((0 == strncmp(pInterface->BaseInterface,WIFI_BASE_IFACE_PATH, strlen(WIFI_BASE_IFACE_PATH))) &&
-       (access("/tmp/wifi_ready_to_process", F_OK) != 0))
-    {
-        return WAN_STATE_PHY_CONFIGURING;
-    }
-
-    return wan_transition_configuring_interface(pWanIfaceCtrl);
-}
-
-static eWanState_t wan_state_phy_down(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
-{
-    if((pWanIfaceCtrl == NULL) || (pWanIfaceCtrl->pIfaceData == NULL))
-    {
-        return ANSC_STATUS_FAILURE;
-    }
-
-    DML_WAN_IFACE* pInterface = pWanIfaceCtrl->pIfaceData;
-    DML_VIRTUAL_IFACE* p_VirtIf = WanMgr_getVirtualIfaceById(pInterface->VirtIfList, pWanIfaceCtrl->VirIfIdx);
-
-    if (pWanIfaceCtrl->WanEnable == FALSE ||
-            pInterface->Selection.Enable == FALSE ||
-            p_VirtIf->Enable == FALSE ||
-            pInterface->Selection.Status == WAN_IFACE_NOT_SELECTED)
-    {
-        return wan_transition_phy_deconfiguring(pWanIfaceCtrl);
-    }
-
-    if ( pInterface->BaseInterfaceStatus == WAN_IFACE_PHY_STATUS_UP )
-    {
-        return wan_transition_vlan_configure(pWanIfaceCtrl);
-    }
-
-    return WAN_STATE_PHY_DOWN;
-}
-
 static eWanState_t wan_state_vlan_configuring(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
 {
     if((pWanIfaceCtrl == NULL) || (pWanIfaceCtrl->pIfaceData == NULL))
@@ -3225,7 +3084,7 @@ static eWanState_t wan_state_ppp_configuring(WanMgr_IfaceSM_Controller_t* pWanIf
     if(p_VirtIf->PPP.Enable == TRUE)
     {
         if(p_VirtIf->PPP.LinkStatus ==  WAN_IFACE_PPP_LINK_STATUS_UP && 
-                !(((p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_SLAAC ) && 
+                !((p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP && 
                 (p_VirtIf->IP.Mode == DML_WAN_IP_MODE_DUAL_STACK || p_VirtIf->IP.Mode == DML_WAN_IP_MODE_IPV6_ONLY)) && 
                 p_VirtIf->PPP.IPV6CPStatus != WAN_IFACE_IPV6CP_STATUS_UP)) //If dhcpv6 used on PPP interface wait for IPv6cp status
         {
@@ -3369,7 +3228,7 @@ static eWanState_t wan_state_obtaining_ip_addresses(WanMgr_IfaceSM_Controller_t*
             WanManager_StopDhcpv4Client(p_VirtIf, STOP_DHCP_WITH_RELEASE);
         }
 
-        if((p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_SLAAC ) && 
+        if(p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP && 
            (p_VirtIf->IP.Mode == DML_WAN_IP_MODE_IPV6_ONLY || p_VirtIf->IP.Mode == DML_WAN_IP_MODE_DUAL_STACK))
         {
             if(p_VirtIf->IP.Dhcp6cStatus != DHCPC_STARTED) 
@@ -3531,7 +3390,7 @@ static eWanState_t wan_state_ipv4_leased(WanMgr_IfaceSM_Controller_t* pWanIfaceC
 
     //Start dhcpv6 client if Ip mode changed runtime
     if(p_VirtIf->IP.RefreshDHCP == TRUE &&
-      ( p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP || p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_SLAAC ) &&
+      p_VirtIf->IP.IPv6Source == DML_WAN_IP_SOURCE_DHCP &&
       p_VirtIf->IP.Mode == DML_WAN_IP_MODE_DUAL_STACK &&
       p_VirtIf->IP.Dhcp6cStatus != DHCPC_STARTED)
     {
@@ -3665,7 +3524,7 @@ static eWanState_t wan_state_ipv6_leased(WanMgr_IfaceSM_Controller_t* pWanIfaceC
     else if (p_VirtIf->IP.Ipv6Status == WAN_IFACE_IPV6_STATE_DOWN ||
              (p_VirtIf->VLAN.Enable == TRUE && p_VirtIf->VLAN.Status ==  WAN_IFACE_LINKSTATUS_DOWN )||
              (p_VirtIf->PPP.Enable == TRUE && p_VirtIf->PPP.LinkStatus != WAN_IFACE_PPP_LINK_STATUS_UP)|| // PPP is Enabled but DOWN
-            (p_VirtIf->IP.RefreshDHCP == TRUE && ((p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP && p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_SLAAC ) ||    // Ipv6source is not dhcp
+            (p_VirtIf->IP.RefreshDHCP == TRUE && (p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP ||    // Ipv6source is not dhcp
             (p_VirtIf->IP.Mode != DML_WAN_IP_MODE_IPV6_ONLY && p_VirtIf->IP.Mode != DML_WAN_IP_MODE_DUAL_STACK))))
     {
         return wan_transition_ipv6_down(pWanIfaceCtrl);
@@ -3810,7 +3669,7 @@ static eWanState_t wan_state_dual_stack_active(WanMgr_IfaceSM_Controller_t* pWan
         }
     }
     else if (p_VirtIf->IP.Ipv6Status == WAN_IFACE_IPV6_STATE_DOWN ||
-            (p_VirtIf->IP.RefreshDHCP == TRUE && ( ( p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP && p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_SLAAC ) ||
+            (p_VirtIf->IP.RefreshDHCP == TRUE && ( p_VirtIf->IP.IPv6Source != DML_WAN_IP_SOURCE_DHCP ||
             (p_VirtIf->IP.Mode != DML_WAN_IP_MODE_DUAL_STACK && p_VirtIf->IP.Mode != DML_WAN_IP_MODE_IPV6_ONLY))))
     {
         /* TODO: Add IPoE Health Check failed for IPv6 here */
@@ -4101,7 +3960,7 @@ static eWanState_t wan_state_deconfiguring_wan(WanMgr_IfaceSM_Controller_t* pWan
             return WAN_STATE_DECONFIGURING_WAN;
     }
 
-    return wan_transition_wan_deconfigured(pWanIfaceCtrl);
+    return wan_transition_exit(pWanIfaceCtrl);
 }
 
 static eWanState_t wan_state_exit(WanMgr_IfaceSM_Controller_t* pWanIfaceCtrl)
@@ -4269,16 +4128,6 @@ static void* WanMgr_InterfaceSMThread( void *arg )
         // process state
         switch (iface_sm_state)
         {
-            case WAN_STATE_PHY_CONFIGURING:
-                {
-                    iface_sm_state = wan_state_phy_configuring(pWanIfaceCtrl);
-                    break;
-                }
-            case WAN_STATE_PHY_DOWN:
-                {
-                    iface_sm_state = wan_state_phy_down(pWanIfaceCtrl);
-                    break;
-                }
             case WAN_STATE_VLAN_CONFIGURING:
                 {
                     iface_sm_state = wan_state_vlan_configuring(pWanIfaceCtrl);
