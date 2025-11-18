@@ -58,6 +58,7 @@ void WanMgr_SetConfigData_Default(DML_WANMGR_CONFIG* pWanDmlConfig)
         pWanDmlConfig->Enable = TRUE;
         pWanDmlConfig->ResetFailOverScan = FALSE;
         pWanDmlConfig->AllowRemoteInterfaces = FALSE;
+        pWanDmlConfig->DisableAutoRouting = FALSE;
         memset(pWanDmlConfig->InterfaceAvailableStatus, 0, BUFLEN_64);
         memset(pWanDmlConfig->InterfaceActiveStatus, 0, BUFLEN_64);
         memset(pWanDmlConfig->CurrentStatus, 0, sizeof(pWanDmlConfig->CurrentStatus));
@@ -799,6 +800,7 @@ void WanMgr_IfaceData_Init(WanMgr_Iface_Data_t* pIfaceData, UINT iface_index)
 
         pWanDmlIface->NoOfVirtIfs = 1; 
         pWanDmlIface->Type = WAN_IFACE_TYPE_UNCONFIGURED;
+        pWanDmlIface->IfaceConnectionType = WAN_IFACE_CONN_TYPE_PRIMARY;
         pWanDmlIface->bSendSelectionTimerExpired = TRUE;	
     }
 }
